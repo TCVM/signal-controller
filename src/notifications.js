@@ -31,32 +31,24 @@ const SIGNAL_CONFIG = {
 
 async function sendMobileNotification(title, message, priority = 'default') {
     return new Promise((resolve, reject) => {
-        const data = JSON.stringify({ 
-            topic: NTFY_CHANNEL,
-            title,
-            message,
-            priority: NTFY_PRIORITY[priority] || 3,
-        });
-
-        const url = new URL(NTFY_SERVER);
-        const options = {
-            hostname: url.hostname,
-            port: 443,
-            path: '/publish',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(data),
-            },
+        const { spawn } = require('child_process');
+        
+        const priorityMap = {
+            low: '1',
+            default: '3', 
+            high: '4',
+            urgent: '5',
         };
 
-        const req = https.request(options, res => {
-            resolve(res.statusCode);
-        });
+        const proc = spawn('curl', [
+            '-H', `Title: ${title}`,
+            '-H', `Priority: ${priorityMap[priority] || '3'}`,
+            '--data-raw', message.replace(/@@/g, ''),
+            `ntfy.sh/${NTFY_CHANNEL}`
+        ]);
 
-        req.on('error', reject);
-        req.write(data);
-        req.end();
+        proc.on('close', code => resolve(code));
+        proc.on('error', reject);
     });
 }
 
