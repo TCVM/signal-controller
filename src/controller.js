@@ -1,20 +1,28 @@
 /**
- * Main controller with notification support and criticality-based pausing.
+ * Main controller — signal dispatcher with notifications and phase management.
  */
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const readline = require('readline');
-const { notify, shouldPause } = require('./notifications');
+const { sendNtfy, sendDesktop, getSignalConfig } = require('./notifications');
+const { PhaseManager } = require('./phases');
 
 const LOG_PATH = process.env.SIGNAL_CONTROLLER_LOG ||
     path.join(process.cwd(), 'logs', 'session-active.md');
 
+const CALLBACK_PORT = process.env.SIGNAL_CONTROLLER_CALLBACK_PORT || 3737;
+
 class Controller {
     constructor(logPath = LOG_PATH) {
         this.logPath = logPath;
-        this.paused = false;
+        this.phases = new PhaseManager();
+        this.phases.load();
+        this.pendingPause = null;
+        this.adapter = null;
         fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        this.startCallbackServer();
     }
 
     appendLog(content) {
@@ -25,101 +33,223 @@ class Controller {
         return new Date().toTimeString().slice(0, 5);
     }
 
-    async waitForResume(signal, adapter) {
-        console.log(`\n⏸️  PAUSED — ${signal} requires your input.`);
-        console.log('Press Enter to resume, or type a response to inject:\n');
-
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
+    startCallbackServer() {
+        // Listens for commands from Ntfy actions (phone responses)
+        const server = http.createServer((req, res) => {
+            if (req.method === 'POST' && req.url === '/phase') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const { choice } = JSON.parse(body);
+                        this.handlePhaseChoice(choice);
+                        res.writeHead(200);
+                        res.end('ok');
+                    } catch (e) {
+                        res.writeHead(400);
+                        res.end('error');
+                    }
+                });
+            } else if (req.method === 'POST' && req.url === '/answer') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', async () => {
+                    try {
+                        const { text } = JSON.parse(body);
+                        if (this.adapter) {
+                            await this.adapter.injectFeedback(
+                                `[RESPUESTA DESDE TELÉFONO]: ${text}`
+                            );
+                        }
+                        res.writeHead(200);
+                        res.end('ok');
+                    } catch (e) {
+                        res.writeHead(400);
+                        res.end('error');
+                    }
+                });
+            } else {
+                res.writeHead(404);
+                res.end();
+            }
         });
 
-        return new Promise(resolve => {
-            rl.question('> ', async answer => {
-                rl.close();
-                if (answer.trim() && adapter) {
-                    await adapter.injectFeedback(
-                        `User response: ${answer}`
-                    );
-                }
-                console.log('▶️  Resuming...\n');
-                resolve();
-            });
+        server.listen(CALLBACK_PORT, () => {
+            console.log(`📡 Callback server listening on port ${CALLBACK_PORT}`);
         });
     }
 
-    async dispatch(signal, content, adapter = null) {
-        const ts = this.timestamp();
-
-        // Log everything
-        this.appendLog(`\n---\n**[${ts}] ${signal}**\n${content}\n---\n`);
-
-        // Send notifications
-        await notify(signal, content);
-
-        // Handle by signal type
-        switch (signal) {
-            case '@@ESCALATE:CRITICAL':
-                console.log('\n🔴 ESCALATE CRITICAL — Take this to Claude:');
-                console.log(`\n${content}\n`);
-                await this.waitForResume(signal, adapter);
-                break;
-
-            case '@@ESCALATE:QUESTION':
-                console.log('\n🟡 ESCALATE QUESTION — Qwen has a question for Claude:');
-                console.log(`\n${content}\n`);
-                console.log('(Qwen continues working — answer when you can)\n');
-                break;
-
-            case '@@CHECKPOINT:AUTO':
-                await this.saveCheckpoint(content, adapter);
-                console.log('\n📍 Auto checkpoint saved. Qwen will start new session.');
-                break;
-
-            case '@@CHECKPOINT:MANUAL':
-                console.log('\n📍 Checkpoint suggested. Run start.bat when ready.');
-                break;
-
-            case '@@DOCUMENT':
-                console.log(`\n📝 Finding logged.`);
-                break;
-
-            case '@@CONFIRM':
-                console.log('\n⚠️  CONFIRM required:');
-                console.log(content);
-                await this.waitForResume(signal, adapter);
-                break;
-
-            case '@@UNKNOWN:ANALYSIS':
-                console.log(`\n❓ Unknown logged — analysis only, continuing.`);
-                break;
-
-            case '@@UNKNOWN:ACTION':
-                console.log('\n🔴 UNKNOWN ACTION — Qwen stopped. Review before continuing:');
-                console.log(`\n${content}\n`);
-                await this.waitForResume(signal, adapter);
-                break;
+    async handlePhaseChoice(choice) {
+        if (choice === '1') {
+            const next = this.phases.next();
+            if (next && this.adapter) {
+                console.log(`\n▶️  Advancing to: ${next.display}`);
+                await this.adapter.injectFeedback(
+                    `[NUEVA FASE]: ${next.display}\n${next.prompt}`
+                );
+                if (this.pendingPause) this.pendingPause = null;
+            }
+        } else if (choice === '2') {
+            this.phases.next();
+            const skipped = this.phases.next();
+            if (skipped && this.adapter) {
+                console.log(`\n⏭️  Skipped to: ${skipped.display}`);
+                await this.adapter.injectFeedback(
+                    `[FASE SALTEADA - NUEVA FASE]: ${skipped.display}\n${skipped.prompt}`
+                );
+            }
+        } else if (choice === '3') {
+            console.log('\n⏸️  Project paused by user.');
+            this.pendingPause = true;
         }
     }
 
-    async saveCheckpoint(content, adapter) {
+    async dispatch(signal, content, adapter = null) {
+        this.adapter = adapter;
+        const config = getSignalConfig(signal);
+        const ts = this.timestamp();
+
+        // Always log
+        this.appendLog(`\n---\n**[${ts}] ${signal}**\n${content}\n---\n`);
+
+        // Desktop notification
+        if (config.desktop) {
+            sendDesktop(`Signal: ${signal}`, content.slice(0, 100));
+        }
+
+        // Handle each signal type
+        switch (signal) {
+            case '@@ESCALATE:CRITICAL':
+                console.log('\n🔴 ESCALATE:CRITICAL — Project paused. Go to your PC.');
+                await sendNtfy({
+                    title: '🔴 CRITICAL — Requiere tu atención',
+                    message: content.slice(0, 500),
+                    priority: 'critical',
+                    tags: ['stop_sign', 'rotating_light'],
+                });
+                this.pendingPause = true;
+                break;
+
+            case '@@ESCALATE:QUESTION':
+                console.log('\n🟡 ESCALATE:QUESTION — Logged, continuing.');
+                await sendNtfy({
+                    title: '🟡 Pregunta para Claude',
+                    message: content.slice(0, 500),
+                    priority: 'normal',
+                    tags: ['question'],
+                    actions: [{
+                        action: 'http',
+                        label: 'Responder',
+                        url: `http://localhost:${CALLBACK_PORT}/answer`,
+                        method: 'POST',
+                        body: JSON.stringify({ text: 'respuesta' }),
+                    }],
+                });
+                break;
+
+            case '@@CHECKPOINT:AUTO':
+                await this.handleCheckpoint(content, true);
+                break;
+
+            case '@@CHECKPOINT:MANUAL':
+                await this.handleCheckpoint(content, false);
+                break;
+
+            case '@@DOCUMENT':
+                console.log(`\n📝 Documented at ${ts}`);
+                break;
+
+            case '@@CONFIRM':
+                console.log('\n⚠️  CONFIRM required — Project paused.');
+                await sendNtfy({
+                    title: '⚠️  Confirmación requerida',
+                    message: content.slice(0, 500),
+                    priority: 'critical',
+                    tags: ['warning'],
+                });
+                this.pendingPause = true;
+                break;
+
+            case '@@UNKNOWN:ANALYSIS':
+                console.log(`\n❓ UNKNOWN:ANALYSIS logged`);
+                break;
+
+            case '@@UNKNOWN:ACTION':
+                console.log('\n🔴 UNKNOWN:ACTION — Project paused immediately.');
+                await sendNtfy({
+                    title: '🔴 UNKNOWN ACTION — No se tomó ninguna acción',
+                    message: content.slice(0, 500),
+                    priority: 'critical',
+                    tags: ['stop_sign'],
+                });
+                this.pendingPause = true;
+                break;
+
+            case '@@READY:NEXT_PHASE':
+                await this.handleNextPhase(content);
+                break;
+        }
+
+        return config.pause || this.pendingPause;
+    }
+
+    async handleCheckpoint(content, auto) {
         const ts = new Date().toTimeString().slice(0, 5).replace(':', '');
         const cpPath = path.join(
             path.dirname(this.logPath),
             `context-checkpoint-${ts}.md`
         );
-        fs.writeFileSync(
-            cpPath,
-            `# Context Checkpoint — ${ts}\n\n${content}`,
-            'utf8'
-        );
-        if (adapter) {
-            await adapter.injectFeedback(
-                `Checkpoint saved to ${cpPath}. ` +
-                `Start a new OpenCode session and load this file to continue.`
-            );
-        }
-        return cpPath;
+        fs.writeFileSync(cpPath, `# Context Checkpoint — ${ts}\n\n${content}`, 'utf8');
+        console.log(`\n📍 CHECKPOINT saved: ${cpPath}`);
+
+        await sendNtfy({
+            title: auto ? '📍 Checkpoint automático' : '📍 Checkpoint sugerido',
+            message: `Guardado en ${cpPath}. ${auto ? 'Sesión nueva iniciada.' : '¿Abrís sesión nueva?'}`,
+            priority: 'normal',
+            tags: ['bookmark'],
+        });
+
+        if (auto) this.pendingPause = true;
+    }
+
+    async handleNextPhase(content) {
+        const options = this.phases.getOptions();
+        const actions = this.phases.buildNtfyActions(options);
+        const optionsText = options.map(o => o.label).join('\n');
+
+        console.log(`\n✅ PHASE COMPLETE — ${this.phases.summary()}`);
+        console.log(`Options:\n${optionsText}`);
+
+        await sendNtfy({
+            title: '✅ Fase completada',
+            message: `${this.phases.summary()}\n\n${optionsText}`,
+            priority: 'normal',
+            tags: ['white_check_mark'],
+            actions,
+        });
+
+        this.pendingPause = true;
+    }
+
+    isPaused() {
+        return this.pendingPause === true;
+    }
+
+    resume() {
+        this.pendingPause = null;
+    }
+
+    prompt(question) {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+        });
+        return new Promise(resolve => {
+            rl.question(question, answer => {
+                rl.close();
+                resolve(answer.toLowerCase() === 'y');
+            });
+        });
     }
 }
 
