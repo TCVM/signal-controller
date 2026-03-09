@@ -7,7 +7,12 @@
 const { execSync } = require('child_process');
 
 const NTFY_SERVER = process.env.SIGNAL_CONTROLLER_NTFY_SERVER || 'https://ntfy.sh';
-const NTFY_CHANNEL = process.env.SIGNAL_CONTROLLER_NTFY_CHANNEL || 'signal-controller';
+const NTFY_CHANNEL = process.env.SIGNAL_CONTROLLER_NTFY_CHANNEL;
+const NTFY_REPLIES_CHANNEL = `${NTFY_CHANNEL}-replies`;
+
+if (!NTFY_CHANNEL) {
+    console.warn('⚠️  SIGNAL_CONTROLLER_NTFY_CHANNEL not set. Ntfy notifications disabled.');
+}
 
 const PRIORITY = {
     critical: 5,
@@ -29,45 +34,81 @@ const SIGNAL_CONFIG = {
     '@@READY:NEXT_PHASE':    { priority: 'normal',   pause: true,  ntfy: true,  desktop: true,  commands: true  },
 };
 
+async function pollReplies(callback) {
+    let since = 'last';
+    console.log(`👂 Listening for replies on ${NTFY_SERVER}/${NTFY_REPLIES_CHANNEL}`);
+    
+    while (true) {
+        try {
+            const response = await fetch(
+                `${NTFY_SERVER}/${NTFY_REPLIES_CHANNEL}/json?poll=1&since=${since}`
+            );
+            const text = await response.text();
+            const lines = text.trim().split('\n').filter(Boolean);
+            
+            for (const line of lines) {
+                try {
+                    const msg = JSON.parse(line);
+                    if (msg.message && msg.id) {
+                        since = msg.id;
+                        await callback(msg.message);
+                    }
+                } catch (e) {}
+            }
+        } catch (e) {
+            // silently retry
+        }
+        await new Promise(r => setTimeout(r, 3000));
+    }
+}
+
 async function sendNtfy({ title, message, priority = 'normal', tags = [], actions = [] }) {
-    const headers = {
-        'Content-Type': 'application/json',
-        'Title': title,
-        'Priority': String(PRIORITY[priority] || 3),
-    };
-
-    if (tags.length > 0) headers['Tags'] = tags.join(',');
-
-    const body = { topic: NTFY_CHANNEL, message };
-    if (actions.length > 0) body.actions = actions;
+    const cleanTitle = title.replace(/[\u{1F000}-\u{1FFFF}]/gu, '').trim();
+    const cleanMessage = message.replace(/[\u{1F000}-\u{1FFFF}]/gu, '').trim();
+    
+    console.log(`DEBUG ntfy: sending to ${NTFY_SERVER}/${NTFY_CHANNEL}`);
+    console.log(`DEBUG title: ${cleanTitle}`);
+    console.log(`DEBUG message: ${cleanMessage}`);
 
     try {
         const response = await fetch(`${NTFY_SERVER}/${NTFY_CHANNEL}`, {
             method: 'POST',
-            headers,
-            body: JSON.stringify(body),
+            body: cleanMessage,
+            headers: {
+                'Title': cleanTitle,
+                'Priority': String(PRIORITY[priority] || 3),
+                'Tags': tags.join(','),
+            }
         });
-        if (!response.ok) {
-            console.error(`Ntfy error: ${response.status}`);
-        }
+        console.log(`DEBUG ntfy status: ${response.status}`);
     } catch (e) {
-        console.error(`Ntfy unreachable: ${e.message}`);
+        console.error(`Ntfy error: ${e.message}`);
     }
 }
 
 function sendDesktop(title, message) {
     try {
-        // Windows toast via PowerShell
+        // Clean for PowerShell single-quoted strings
+        const safeTitle = title.replace(/'/g, '').replace(/[\u{1F000}-\u{1FFFF}]/gu, '').trim();
+        const safeMessage = message.replace(/'/g, '').replace(/[\u{1F000}-\u{1FFFF}]/gu, '').trim();
+        
         const script = `
-            Add-Type -AssemblyName System.Windows.Forms
+            [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
             $notify = New-Object System.Windows.Forms.NotifyIcon
             $notify.Icon = [System.Drawing.SystemIcons]::Information
+            $notify.BalloonTipTitle = '${safeTitle}'
+            $notify.BalloonTipText = '${safeMessage}'
             $notify.Visible = $true
-            $notify.ShowBalloonTip(5000, '${title.replace(/'/g, '')}', '${message.replace(/'/g, '')}', 'Info')
+            $notify.ShowBalloonTip(5000)
+            Start-Sleep -Milliseconds 5500
+            $notify.Dispose()
         `;
-        execSync(`powershell -Command "${script}"`, { stdio: 'ignore' });
+        execSync(
+            `powershell -ExecutionPolicy Bypass -Command "${script}"`,
+            { stdio: 'pipe' }
+        );
     } catch (e) {
-        // Silently fail if not on Windows
+        console.error(`Desktop notification error: ${e.message}`);
     }
 }
 
@@ -81,4 +122,4 @@ function getSignalConfig(signal) {
     };
 }
 
-module.exports = { sendNtfy, sendDesktop, getSignalConfig, SIGNAL_CONFIG };
+module.exports = { sendNtfy, sendDesktop, getSignalConfig, SIGNAL_CONFIG, pollReplies, NTFY_CHANNEL };

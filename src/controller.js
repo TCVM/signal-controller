@@ -79,6 +79,33 @@ class Controller {
         });
     }
 
+    constructor(logPath = LOG_PATH) {
+    this.logPath = logPath;
+    this.phases = new PhaseManager();
+    this.phases.load();
+    this.pendingPause = null;
+    this.adapter = null;
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    this.startCallbackServer();
+    this.startReplyPolling();
+    }
+
+    startReplyPolling() {
+        const { pollReplies } = require('./notifications');
+        pollReplies(async (message) => {
+            console.log(`\n📱 Reply received: ${message}`);
+            if (this.adapter) {
+                await this.adapter.injectFeedback(
+                    `[RESPUESTA DESDE TELÉFONO]: ${message}`
+                );
+            }
+            if (this.pendingPause) {
+                this.resume();
+                console.log('▶️  Project resumed by phone reply.');
+            }
+        });
+    }
+
     async handlePhaseChoice(choice) {
         if (choice === '1') {
             const next = this.phases.next();
@@ -133,17 +160,10 @@ class Controller {
             case '@@ESCALATE:QUESTION':
                 console.log('\n🟡 ESCALATE:QUESTION — Logged, continuing.');
                 await sendNtfy({
-                    title: '🟡 Pregunta para Claude',
-                    message: content.slice(0, 500),
+                    title: 'Pregunta para Claude',
+                    message: `${content.slice(0, 400)}\n\nResponde publicando en canal: ${NTFY_CHANNEL}-replies`,
                     priority: 'normal',
                     tags: ['question'],
-                    actions: [{
-                        action: 'http',
-                        label: 'Responder',
-                        url: `http://localhost:${CALLBACK_PORT}/answer`,
-                        method: 'POST',
-                        body: JSON.stringify({ text: 'respuesta' }),
-                    }],
                 });
                 break;
 

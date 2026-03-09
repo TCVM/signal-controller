@@ -6,6 +6,13 @@
  *   node src/index.js --opencode   # OpenCode real-time mode
  */
 
+require('dotenv').config({ 
+    path: process.env.SIGNAL_CONTROLLER_ENV
+});
+
+console.log('DEBUG ENV path:', process.env.SIGNAL_CONTROLLER_ENV);
+console.log('DEBUG channel:', process.env.SIGNAL_CONTROLLER_NTFY_CHANNEL);
+
 const { Controller } = require('./controller');
 const args = process.argv.slice(2);
 

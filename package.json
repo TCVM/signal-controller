@@ -17,6 +17,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@opencode-ai/sdk": "^1.2.22"
+    "@opencode-ai/sdk": "^1.2.22",
+    "dotenv": "^17.3.1"
   }
 }
