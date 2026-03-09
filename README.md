@@ -71,3 +71,25 @@ See: [gma500-reverse-engineering](https://github.com/TCVM/gma500-reverse-enginee
 
 Early prototype — being iterated on actively during real usage.
 Contributions welcome.
+
+## Architecture
+
+```
+OpenCode (running Qwen)
+      ↓ SSE stream (real-time output)
+Signal Controller (adapter/opencode.js)
+      ↓ detects @@SIGNALS
+      ↓ logs findings
+      ↓ injects feedback via tui.appendPrompt()
+Qwen "feels" its state as input
+      ↓ responds accordingly
+```
+
+The controller closes the loop — Qwen doesn't need to calculate its own state,
+it receives it as external input. The cognitive load stays on the problem,
+not on self-monitoring.
+
+## Adapters
+
+- `adapters/opencode.js` — Full integration via OpenCode SDK (real-time, bidirectional)
+- `adapters/generic.py` — Manual paste mode for any LLM without API access
