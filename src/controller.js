@@ -23,6 +23,7 @@ class Controller {
         this.adapter = null;
         fs.mkdirSync(path.dirname(logPath), { recursive: true });
         this.startCallbackServer();
+        this.startReplyPolling();
     }
 
     appendLog(content) {
@@ -77,17 +78,6 @@ class Controller {
         server.listen(CALLBACK_PORT, () => {
             console.log(`📡 Callback server listening on port ${CALLBACK_PORT}`);
         });
-    }
-
-    constructor(logPath = LOG_PATH) {
-    this.logPath = logPath;
-    this.phases = new PhaseManager();
-    this.phases.load();
-    this.pendingPause = null;
-    this.adapter = null;
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    this.startCallbackServer();
-    this.startReplyPolling();
     }
 
     startReplyPolling() {
