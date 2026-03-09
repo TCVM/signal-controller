@@ -1,28 +1,47 @@
 /**
  * Signal definitions and parser.
- * JS port of signals.py for OpenCode SDK integration.
  */
 
 const SIGNALS = {
-    '@@ESCALATE': {
-        description: 'Needs a more capable model',
-        severity: 'high',
+    '@@ESCALATE:CRITICAL': {
+        description: 'Needs more capable model — CRITICAL, pause and wait',
+        severity: 'critical',
+        baseSignal: '@@ESCALATE',
     },
-    '@@CHECKPOINT': {
-        description: 'Context degrading or session is long',
+    '@@ESCALATE:QUESTION': {
+        description: 'Has a question for more capable model — can continue',
+        severity: 'medium',
+        baseSignal: '@@ESCALATE',
+    },
+    '@@CHECKPOINT:AUTO': {
+        description: 'Context degraded, auto checkpoint and new session',
         severity: 'high',
+        baseSignal: '@@CHECKPOINT',
+    },
+    '@@CHECKPOINT:MANUAL': {
+        description: 'Long session, suggests manual checkpoint',
+        severity: 'low',
+        baseSignal: '@@CHECKPOINT',
     },
     '@@DOCUMENT': {
-        description: 'Important finding occurred',
-        severity: 'medium',
+        description: 'Important finding, log it',
+        severity: 'low',
+        baseSignal: '@@DOCUMENT',
     },
     '@@CONFIRM': {
-        description: 'About to do something irreversible',
-        severity: 'high',
+        description: 'About to do something irreversible, pause and confirm',
+        severity: 'critical',
+        baseSignal: '@@CONFIRM',
     },
-    '@@UNKNOWN': {
-        description: 'Cannot determine with available information',
+    '@@UNKNOWN:ANALYSIS': {
+        description: 'Does not know what something is — observing only, continue',
         severity: 'low',
+        baseSignal: '@@UNKNOWN',
+    },
+    '@@UNKNOWN:ACTION': {
+        description: 'Does not know if action is safe — STOP immediately',
+        severity: 'critical',
+        baseSignal: '@@UNKNOWN',
     },
 };
 
